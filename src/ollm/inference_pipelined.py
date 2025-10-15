@@ -15,12 +15,14 @@ def get_attn_implementation():
 
 
 class InferencePipelined:
-	def __init__(self, model_id, device="cuda:0", logging=True, multimodality=False, use_pipeline=True):
+	def __init__(self, model_id, device="cuda:0", logging=True, multimodality=False, use_pipeline=True, pipeline_buffers: dict = None):
 		self.model_id = model_id
 		self.device = torch.device(device)
 		self.multimodality = multimodality
 		self.stats = Stats() if logging else None
 		self.use_pipeline = use_pipeline
+		self.pipeline_buffers = pipeline_buffers or {'cpu': 3, 'gpu': 2}
+
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)
@@ -91,8 +93,12 @@ class InferencePipelined:
 				low_cpu_mem_usage=True, 
 				ignore_mismatched_sizes=True
 			)
-			# Enable pipeline after model is loaded
-			self.model.enable_pipeline(True)
+			# Enable pipeline after model is loaded with configured buffer counts
+			self.model.enable_pipeline(
+				True, 
+				num_cpu_buffers=self.pipeline_buffers.get('cpu', 3),
+				num_gpu_buffers=self.pipeline_buffers.get('gpu', 2)
+			)
 			
 		elif self.model_id=="qwen3-next-80B":
 			from . import qwen3_next

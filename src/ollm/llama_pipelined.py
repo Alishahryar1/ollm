@@ -1,3 +1,5 @@
+# llama3-1B/3B/8B-chat with pipelined loading and cyclic continuation
+
 import time
 from datetime import datetime
 import torch
@@ -125,22 +127,28 @@ class MyLlamaModel(LlamaModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
         #============= pipelined execution ==============
+        # Store original device of embed/lm_head
         embed_device = self.embed_tokens.weight.device
         lm_head_device = self.parent_lm_head.weight.device
         
+        # Only move to CPU if they're on GPU (to free VRAM during layer execution)
         if embed_device.type == 'cuda':
             self.embed_tokens.cpu()
         if lm_head_device.type == 'cuda':
             self.parent_lm_head.cpu()
         
+        # Initialize pipeline before first layer
         global pipeline
         if pipeline is not None:
             if not hasattr(pipeline, '_initialized'):
                 pipeline.initialize_pipeline(start_layer=0)
                 pipeline._initialized = True
             
+            # If this is a new sequence (prefill with many tokens), reset generation counter
+            # Detect prefill: large cache_position or no past_key_values
             is_prefill = (cache_position.numel() > 1) or (past_key_values is None or past_key_values.get_seq_length() == 0)
             if is_prefill and getattr(pipeline, '_last_was_decode', False):
+                # Transition from decode to prefill means new sequence
                 pipeline.reset_generation_counter()
                 print("[Llama] New sequence detected, reset pipeline generation counter")
             pipeline._last_was_decode = not is_prefill
@@ -158,12 +166,14 @@ class MyLlamaModel(LlamaModel):
         
         hidden_states = self.norm(hidden_states)
         
+        # Move embed/lm_head back to GPU where hidden_states is
         self.embed_tokens.to(hidden_states.device)
         self.parent_lm_head.to(hidden_states.device)
         
         if stats:
             print("./LlamaPipelined.forward.", datetime.now().strftime("%H:%M:%S"), 
                   stats.print_and_clean() if stats else "")
+        #================================================
         
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -188,8 +198,8 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
         with torch.no_grad():
             return super().generate(**args)
     
-    def enable_pipeline(self, enable: bool = True):
-        """Enable or disable pipelined loading"""
+    def enable_pipeline(self, enable: bool = True, num_cpu_buffers: int = 6, num_gpu_buffers: int = 2):
+        """Enable or disable pipelined loading with configurable buffer counts."""
         global pipeline, loader, stats
         
         if enable:
@@ -197,9 +207,11 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
                 pipeline = LayerPipeline(
                     loader=loader,
                     stats=stats,
-                    num_layers=self.num_hidden_layers
+                    num_layers=self.num_hidden_layers,
+                    num_cpu_buffers=num_cpu_buffers,
+                    num_gpu_buffers=num_gpu_buffers
                 )
-                print("[Llama] Pipeline enabled (cyclic mode)")
+                print(f"[Llama] Pipeline enabled (cyclic mode, {num_cpu_buffers} CPU / {num_gpu_buffers} GPU buffers)")
             else:
                 print("[Llama] Pipeline already enabled")
         else:
@@ -207,7 +219,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
     
     def cleanup_pipeline(self):
         """
-        FIX: Explicitly stop and clean up the pipeline resources.
+        Explicitly stop and clean up the pipeline resources.
         This is more reliable than using __del__.
         """
         global pipeline
@@ -215,3 +227,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
             pipeline.cleanup()
             pipeline = None
             print("[Llama] Pipeline cleaned up and disabled.")
+
+    def __del__(self):
+        """Attempt to cleanup pipeline on deletion, though explicit cleanup is preferred."""
+        self.cleanup_pipeline()
