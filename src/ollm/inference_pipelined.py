@@ -21,7 +21,7 @@ class InferencePipelined:
 		self.multimodality = multimodality
 		self.stats = Stats() if logging else None
 		self.use_pipeline = use_pipeline
-		self.pipeline_buffers = pipeline_buffers or {'cpu': 3, 'gpu': 2}
+		self.pipeline_buffers = pipeline_buffers or {'cpu': 6, 'gpu': 2}
 
 
 	def download_and_unpack(self, models_dir: str):
