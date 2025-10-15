@@ -1,7 +1,6 @@
 import json, os, time, math, re
 import torch
 from torch.utils.dlpack import from_dlpack
-#from safetensors.torch import safe_open, load_file
 import struct
 
 kvikio_available = False
@@ -40,34 +39,30 @@ class GDSWeights:
 	def get_dtype(self, dtype):
 		return {
 			"float16": cp.float16,
-			"bfloat16": cp.float16, #cp.dtype('bfloat16'),
+			"bfloat16": cp.float16,
 			"float32": cp.float32,
 			"float64": cp.float64,
 			"int8": cp.int8,
 			"int32": cp.int32,
 		}[dtype]
 
-	def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
+	def load_from_disk_to_cuda(self, path, shape, dtype):
 		cp_dtype = self.get_dtype(dtype)
 		n_elems = 1
 		for s in shape:
 			n_elems *= s
 		nbytes = n_elems * cp.dtype(cp_dtype).itemsize
 
-		# Allocate on GPU
 		with cp.cuda.Device(0):
 			buf = cp.empty(n_elems, dtype=cp_dtype)
 
-		# DMA read directly into GPU buffer
 		with kvikio.CuFile(path, "r") as f:
-			# Read raw bytes straight into GPU memory
 			n = f.read(buf)
 			if n != nbytes:
 				raise IOError(f"Short read: {n} of {nbytes} bytes from {path}")
 
-		# Reshape and hand to torch via DLPack
 		buf = buf.reshape(shape)
-		t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
+		t = from_dlpack(buf.toDlpack())
 		return t    
 
 	def has(self, name: str) -> bool:
@@ -78,7 +73,7 @@ class GDSWeights:
 		return tensor
 
 	def load_mxfp4_from_disk(self, path, shape, dtype):
-		packed = torch.load(path, map_location=self.device) #{_blocks:t, _scales:t}		
+		packed = torch.load(path, map_location=self.device)
 		tensor = convert_moe_packed_tensors(packed["_blocks"], packed["_scales"]).to(self.device)		
 		return tensor
 
@@ -87,8 +82,8 @@ class GDSWeights:
 		path, shape, dtype, packed = os.path.join(self.path, meta["path"]), meta["shape"], meta["dtype"], meta.get("packed")
 		if packed=="mxfp4" or dtype.startswith("torch"):
 			tensor = torch.load(path, map_location="cpu")
-		else: #kvikio, numpy
-			tensor = self.load_from_disk_to_cuda(path, shape, dtype).cpu() #should be without GPU
+		else:
+			tensor = self.load_from_disk_to_cuda(path, shape, dtype).cpu()
 		self.offloaded_map[name] = {"shape":shape, "dtype":dtype, "packed":packed, "tensor":tensor}
 
 	def get_offloaded_from_cpu_to_cuda(self, name):
@@ -107,43 +102,18 @@ class GDSWeights:
 #=========================================================================
 
 FP4_VALUES = [
-	+0.0,
-	+0.5,
-	+1.0,
-	+1.5,
-	+2.0,
-	+3.0,
-	+4.0,
-	+6.0,
-	-0.0,
-	-0.5,
-	-1.0,
-	-1.5,
-	-2.0,
-	-3.0,
-	-4.0,
-	-6.0,
+	+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0,
+	-0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ]
 
-def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
+def convert_moe_packed_tensors(
 	blocks,
 	scales,
 	*,
 	dtype: torch.dtype = torch.bfloat16,
-	rows_per_chunk: int = 32768 * 1024,  # TODO these values are not here by mistake ;)
+	rows_per_chunk: int = 32768 * 1024,
 ) -> torch.Tensor:
-	"""
-	Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
-	pass of GPT_OSS.
-	"""
-
-	# Check if blocks and scales are on CPU, and move to GPU if so
-	#if not blocks.is_cuda and torch.cuda.is_available():
-	#    blocks = blocks.cuda()
-	#    scales = scales.cuda()
-
-	scales = scales.to(torch.int32) - 127  # TODO that's because 128=2**7
-
+	scales = scales.to(torch.int32) - 127
 	assert blocks.shape[:-1] == scales.shape, f"{blocks.shape[:-1]=} does not match {scales.shape=}"
 
 	lut = torch.tensor(FP4_VALUES, dtype=dtype, device=blocks.device)
@@ -162,7 +132,6 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 		blk = blocks[r0:r1]
 		exp = scales[r0:r1]
 
-		# nibble indices -> int64
 		idx_lo = (blk & 0x0F).to(torch.long)
 		idx_hi = (blk >> 4).to(torch.long)
 
@@ -180,7 +149,8 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 
 #=========================================================================
 
-class SafeTensorReader: #safetensors replacement because its mmap is killing the RAM
+class SafeTensorReader:
+	"""Fixed safetensors reader that properly handles buffers"""
 	def __init__(self, path):
 		self.path = path		
 		with open(path, "rb") as f:
@@ -188,7 +158,15 @@ class SafeTensorReader: #safetensors replacement because its mmap is killing the
 			self.header = json.loads(f.read(header_len))
 			self.data_offset = 8 + header_len
 		self._fp = open(path, "rb")
-		self.DTYPE_MAP = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16, "I32": torch.int32, "I64": torch.int64}
+		self.DTYPE_MAP = {
+			"F32": torch.float32, 
+			"F16": torch.float16, 
+			"BF16": torch.bfloat16, 
+			"I32": torch.int32, 
+			"I64": torch.int64,
+			"U8": torch.uint8,
+			"I8": torch.int8
+		}
 	
 	def close(self):
 		self._fp.close()
@@ -197,13 +175,35 @@ class SafeTensorReader: #safetensors replacement because its mmap is killing the
 		return list(self.header.keys())
 
 	def get_tensor(self, name):
+		"""Fixed version that correctly handles tensor buffers"""
 		info = self.header[name]
 		dtype = self.DTYPE_MAP[info["dtype"]]
 		shape = info["shape"]
 		off0, off1 = info["data_offsets"]
+		nbytes = off1 - off0
+		
 		self._fp.seek(self.data_offset + off0)
-		buf = self._fp.read(off1 - off0)
-		return torch.frombuffer(memoryview(buf), dtype=dtype).reshape(shape)
+		buf = self._fp.read(nbytes)
+		
+		if len(buf) != nbytes:
+			raise RuntimeError(f"Expected {nbytes} bytes but read {len(buf)} bytes for tensor {name}")
+		
+		# Use bytearray for proper buffer protocol
+		tensor = torch.frombuffer(bytearray(buf), dtype=dtype)
+		
+		# Verify size matches expected shape
+		expected_numel = 1
+		for dim in shape:
+			expected_numel *= dim
+		
+		if tensor.numel() != expected_numel:
+			raise RuntimeError(
+				f"Tensor {name}: shape {shape} requires {expected_numel} elements "
+				f"but buffer contains {tensor.numel()} elements. "
+				f"Buffer size: {nbytes} bytes, dtype size: {tensor.element_size()} bytes"
+			)
+		
+		return tensor.reshape(shape)
 
 
 class SafeTensorReaderGPU:
@@ -216,7 +216,6 @@ class SafeTensorReaderGPU:
 			self.header = json.loads(f.read(header_len))
 			self.data_offset = 8 + header_len
 		
-		# Open with kvikio (GPU-aware file handle)
 		self._fp = kvikio.CuFile(path, "rb")
 
 	def __enter__(self):
@@ -233,23 +232,21 @@ class SafeTensorReaderGPU:
 		return list(self.header.keys())
 
 	def get_tensor(self, name: str) -> torch.Tensor:
-		if name not in self.header: raise KeyError(f"Tensor '{name}' not found in {self.path}")
+		if name not in self.header: 
+			raise KeyError(f"Tensor '{name}' not found in {self.path}")
 		info = self.header[name]
 		dtype = self.DTYPE_MAP[info["dtype"]]
 		shape = tuple(info["shape"])
 		off0, off1 = info["data_offsets"]
 		nbytes = off1 - off0
 
-		# Allocate GPU buffer (CuPy)
 		buf = cp.empty((nbytes,), dtype=cp.uint8)
 
-		# Asynchronous pread → returns IOFuture
 		future = self._fp.pread(buf, file_offset=self.data_offset + off0)
-
-		# Block until done
 		nread = future.get()
-		if nread != nbytes: raise IOError(f"Expected {nbytes} bytes, got {nread}")
-		# Convert byte buffer → torch tensor
+		if nread != nbytes: 
+			raise IOError(f"Expected {nbytes} bytes, got {nread}")
+		
 		torch_tensor = torch.as_tensor(buf, device=self.device).view(torch.uint8)
 		torch_tensor = torch_tensor.view(dtype).reshape(shape)
 		return torch_tensor
@@ -265,16 +262,18 @@ def get_optimal_safetensor_reader(filepath, device=None):
 
 class DenseWeightsLoader:
 	def __init__(self, path: str, device="cuda:0"):
-		self.path = path #<model_dir>
+		self.path = path
 		index_path = os.path.join(path, 'model.safetensors.index.json')
-		with open(index_path) as f: indexes = json.load(f)
+		with open(index_path) as f: 
+			indexes = json.load(f)
 		self.manifest, self.safetensors = {}, {}
 		for manifest_name, filename in indexes["weight_map"].items():
 			match1 = re.search(r"(language_model.model\.layers\.\d+\.)", manifest_name)
 			match2 = re.search(r"(model\.layers\.\d+\.)", manifest_name)			
 			if match1 or match2:
 				base = match1.group(1) if match1 else match2.group(1)
-				if base not in self.manifest: self.manifest[base] = {}
+				if base not in self.manifest: 
+					self.manifest[base] = {}
 				attr_path = manifest_name.replace(base, "")
 				self.manifest[base][attr_path] = filename
 
@@ -298,7 +297,7 @@ class DenseWeightsLoader:
 			return d2
 		return None
 
-	def load_dict_from_disk(self, base, device='cpu'): #original safetensors
+	def load_dict_from_disk(self, base, device='cpu'):
 		dbase, d = self.manifest[base], {}
 		for attr_path, filename in dbase.items():
 			d[attr_path] = self.safetensors[filename].get_tensor(base+attr_path).to(device)
@@ -312,8 +311,8 @@ class DenseWeightsLoader:
 
 
 class SingleDenseWeightsLoader(DenseWeightsLoader):
-	def __init__(self, path: str, device="cuda:0"): #single .safetensor
-		self.path = path #<model_dir>
+	def __init__(self, path: str, device="cuda:0"):
+		self.path = path
 		self.device = torch.device(device)
 		self.offloaded_map = {}
 		self.manifest, self.safetensors = {}, {}
@@ -324,7 +323,8 @@ class SingleDenseWeightsLoader(DenseWeightsLoader):
 			match1 = re.search(r"(model\.layers\.\d+\.)", manifest_name)
 			if match1:
 				base = match1.group(1)
-				if base not in self.manifest: self.manifest[base] = {}
+				if base not in self.manifest: 
+					self.manifest[base] = {}
 				attr_path = manifest_name.replace(base, "")
 				self.manifest[base][attr_path] = filename
 
@@ -332,19 +332,20 @@ class SingleDenseWeightsLoader(DenseWeightsLoader):
 		pass
 
 
-
-class MoEWeightsLoader(DenseWeightsLoader): #qwen3_next safetensors
+class MoEWeightsLoader(DenseWeightsLoader):
 	def __init__(self, path: str, device="cuda:0"):
-		self.path = path #<model_dir>
+		self.path = path
 		index_path = os.path.join(path, 'model.safetensors.index.json')
-		with open(index_path) as f: indexes = json.load(f)
+		with open(index_path) as f: 
+			indexes = json.load(f)
 		self.manifest, self.safetensors = {}, {}
 		for manifest_name, filename in indexes["weight_map"].items():
 			match1 = re.search(r"(model\.layers\.\d+\.mlp\.experts\.\d+\.)", manifest_name)
 			match2 = re.search(r"(model\.layers\.\d+\.)", manifest_name)
 			if match1 or match2:
 				base = match1.group(1) if match1 else match2.group(1)
-				if base not in self.manifest: self.manifest[base] = {}
+				if base not in self.manifest: 
+					self.manifest[base] = {}
 				attr_path = manifest_name.replace(base, "")
 				self.manifest[base][attr_path] = filename
 
@@ -352,15 +353,12 @@ class MoEWeightsLoader(DenseWeightsLoader): #qwen3_next safetensors
 		self.offloaded_map = {}
 
 	def preload_layer_safetensors(self, base):
-		#for filename, x in self.safetensors.items(): x.close() #f.__exit__(None, None, None)
-		#del self.safetensors
-		#self.safetensors = {}
 		for base1 in list(self.manifest.keys()):
 			if base1.startswith(base):
 				for attr_path, filename in self.manifest[base1].items():
 					if filename not in self.safetensors:
 						filepath = os.path.join(self.path, filename)
-						self.safetensors[filename] = get_optimal_safetensor_reader(filepath) #safe_open(filepath, framework="pt")
+						self.safetensors[filename] = get_optimal_safetensor_reader(filepath)
 
 
 #=========================================================================
