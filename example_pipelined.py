@@ -42,7 +42,7 @@ def cyclic_pipeline_demo():
     
     # Prepare a prompt that will generate multiple tokens
     sm = "You are a helpful AI assistant"
-    um = "List the first 5 planets in our solar system with a brief description of each"
+    um = "List planets starting from Mercury"
     
     messages = [
         {"role": "system", "content": sm}, 
