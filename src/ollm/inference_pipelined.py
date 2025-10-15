@@ -164,6 +164,14 @@ class InferencePipelined:
 		if not hasattr(self, "tokenizer"): 
 			self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
+	def cleanup(self):
+		"""
+		Call this method to gracefully shut down the pipeline's background threads
+		before the program exits.
+		"""
+		if self.use_pipeline and hasattr(self.model, 'cleanup_pipeline'):
+			print("Cleaning up pipeline resources...")
+			self.model.cleanup_pipeline()
 	
 	def offload_layers_to_cpu(self, **args):
 		"""Note: Not needed with pipeline, but kept for compatibility"""
