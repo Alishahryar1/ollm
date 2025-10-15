@@ -31,13 +31,13 @@ def cyclic_pipeline_demo():
             logging=True,
             use_pipeline=True,
             # Example of customizing buffer counts
-            pipeline_buffers={'cpu': 4, 'gpu': 2} 
+            pipeline_buffers={'cpu': 2, 'gpu': 2} 
         )
         
         print("\n[2] Loading model...")
         o.ini_model(
             models_dir="/media/mega4alik/ssd/models/", 
-            force_download=False
+            force_download=True
         )
         
         print("\n[3] Setting up for generation...")
