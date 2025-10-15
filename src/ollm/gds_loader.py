@@ -1,7 +1,10 @@
+# FILE: gds_loader.py
+
 import json, os, time, math, re
 import torch
 from torch.utils.dlpack import from_dlpack
 import struct
+import mmap # Import the mmap module
 
 kvikio_available = False
 try:
@@ -9,12 +12,13 @@ try:
 	import cupy as cp   
 	kvikio_available = True
 except ImportError:
-    print("Warning: kvikio is not imported")
+    print("Warning: kvikio is not available. Falling back to CPU-based readers.")
 
 # shared objects
 stats = None
 
 class GDSWeights:
+	# ... (This class remains unchanged)
 	def __init__(self, path: str, device="cuda:0"):
 		self.path = path #<model_dir>/gds_export/
 		manifest_path = os.path.join(path, 'manifest.json')
@@ -100,7 +104,7 @@ class GDSWeights:
 		return None
 
 #=========================================================================
-
+# ... (FP4 conversion functions remain unchanged)
 FP4_VALUES = [
 	+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0,
 	-0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
@@ -146,11 +150,10 @@ def convert_moe_packed_tensors(
 	del blocks, scales, lut
 	return out.transpose(1, 2).contiguous()
 
-
 #=========================================================================
 
 class SafeTensorReader:
-	"""Fixed safetensors reader that properly handles buffers"""
+	"""Legacy safetensors reader using explicit read(). Kept as a fallback."""
 	def __init__(self, path):
 		self.path = path		
 		with open(path, "rb") as f:
@@ -159,13 +162,8 @@ class SafeTensorReader:
 			self.data_offset = 8 + header_len
 		self._fp = open(path, "rb")
 		self.DTYPE_MAP = {
-			"F32": torch.float32, 
-			"F16": torch.float16, 
-			"BF16": torch.bfloat16, 
-			"I32": torch.int32, 
-			"I64": torch.int64,
-			"U8": torch.uint8,
-			"I8": torch.int8
+			"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16, 
+			"I32": torch.int32, "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8
 		}
 	
 	def close(self):
@@ -175,7 +173,6 @@ class SafeTensorReader:
 		return list(self.header.keys())
 
 	def get_tensor(self, name):
-		"""Fixed version that correctly handles tensor buffers"""
 		info = self.header[name]
 		dtype = self.DTYPE_MAP[info["dtype"]]
 		shape = info["shape"]
@@ -188,25 +185,71 @@ class SafeTensorReader:
 		if len(buf) != nbytes:
 			raise RuntimeError(f"Expected {nbytes} bytes but read {len(buf)} bytes for tensor {name}")
 		
-		# Use bytearray for proper buffer protocol
 		tensor = torch.frombuffer(bytearray(buf), dtype=dtype)
 		
-		# Verify size matches expected shape
-		expected_numel = 1
-		for dim in shape:
-			expected_numel *= dim
-		
+		expected_numel = math.prod(shape)
 		if tensor.numel() != expected_numel:
 			raise RuntimeError(
 				f"Tensor {name}: shape {shape} requires {expected_numel} elements "
-				f"but buffer contains {tensor.numel()} elements. "
-				f"Buffer size: {nbytes} bytes, dtype size: {tensor.element_size()} bytes"
+				f"but buffer contains {tensor.numel()} elements."
 			)
 		
 		return tensor.reshape(shape)
 
+# NEW: High-performance memory-mapped reader
+class SafeTensorReaderMmap:
+    """High-performance safetensors reader using memory-mapping for zero-copy reads."""
+    def __init__(self, path):
+        self.path = path
+        self.DTYPE_MAP = {
+            "F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16,
+            "I32": torch.int32, "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8
+        }
+        
+        self._fp = open(path, "rb")
+        header_len = struct.unpack("<Q", self._fp.read(8))[0]
+        self.header = json.loads(self._fp.read(header_len))
+        self.data_offset = 8 + header_len
+        
+        # Memory-map the entire file for read access
+        self.mmap = mmap.mmap(self._fp.fileno(), 0, access=mmap.ACCESS_READ)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
+        if hasattr(self, 'mmap') and self.mmap:
+            self.mmap.close()
+        if hasattr(self, '_fp') and self._fp:
+            self._fp.close()
+
+    def keys(self):
+        return list(self.header.keys())
+
+    def get_tensor(self, name: str) -> torch.Tensor:
+        info = self.header[name]
+        dtype = self.DTYPE_MAP[info["dtype"]]
+        shape = info["shape"]
+        off0, _ = info["data_offsets"]
+        
+        numel = math.prod(shape)
+        
+        # Create a tensor that VIEWS the memory-mapped region. No data is copied.
+        tensor = torch.frombuffer(
+            self.mmap,
+            dtype=dtype,
+            count=numel,
+            offset=self.data_offset + off0
+        )
+        
+        return tensor.reshape(shape)
+
 
 class SafeTensorReaderGPU:
+	# ... (This class remains unchanged, it's already optimal for GPU)
 	def __init__(self, path: str, device="cuda:0"):
 		self.DTYPE_MAP = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16}
 		self.path = path
@@ -252,14 +295,30 @@ class SafeTensorReaderGPU:
 		return torch_tensor
 
 
-def get_optimal_safetensor_reader(filepath, device=None):
-	if kvikio_available:
-		return SafeTensorReaderGPU(filepath, device=device)
-	else:
-		return SafeTensorReader(filepath)
+# UPDATED: This function now selects the best available reader
+def get_optimal_safetensor_reader(filepath, device="cpu"):
+    """
+    Selects the fastest available SafeTensor reader based on environment and device.
+    - SafeTensorReaderGPU: If kvikio is available and device is CUDA (fastest).
+    - SafeTensorReaderMmap: If on CPU, uses memory-mapping for high performance.
+    - SafeTensorReader: A basic fallback if mmap is not supported.
+    """
+    device = torch.device(device)
+    if kvikio_available and device.type == 'cuda':
+        print(f"Using GPU-direct reader for {os.path.basename(filepath)}")
+        return SafeTensorReaderGPU(filepath, device=device)
+    else:
+        try:
+            # mmap is generally available and the fastest CPU option
+            print(f"Using memory-mapped CPU reader for {os.path.basename(filepath)}")
+            return SafeTensorReaderMmap(filepath)
+        except Exception:
+            # Fallback to the original, slower reader if mmap fails
+            print(f"Warning: mmap failed. Using standard file reader for {os.path.basename(filepath)}")
+            return SafeTensorReader(filepath)
 
 #=========================================================================
-
+# ... (DenseWeightsLoader and other classes remain unchanged)
 class DenseWeightsLoader:
 	def __init__(self, path: str, device="cuda:0"):
 		self.path = path
@@ -307,6 +366,7 @@ class DenseWeightsLoader:
 		for attr_path, filename in self.manifest[base].items():
 			if filename not in self.safetensors:
 				filepath = os.path.join(self.path, filename)
+				# The magic happens here: it will now pick the best reader automatically
 				self.safetensors[filename] = get_optimal_safetensor_reader(filepath, device=self.device)
 
 
@@ -358,7 +418,7 @@ class MoEWeightsLoader(DenseWeightsLoader):
 				for attr_path, filename in self.manifest[base1].items():
 					if filename not in self.safetensors:
 						filepath = os.path.join(self.path, filename)
-						self.safetensors[filename] = get_optimal_safetensor_reader(filepath)
+						self.safetensors[filename] = get_optimal_safetensor_reader(filepath, device=self.device)
 
 
 #=========================================================================
