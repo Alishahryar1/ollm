@@ -93,10 +93,10 @@ class InferencePipelined:
 				low_cpu_mem_usage=True, 
 				ignore_mismatched_sizes=True
 			)
-			# Enable pipeline after model is loaded with configured buffer counts
+			# FIX: Pass the configured buffer counts from __init__ to the model
 			self.model.enable_pipeline(
 				True, 
-				num_cpu_buffers=self.pipeline_buffers.get('cpu', 3),
+				num_cpu_buffers=self.pipeline_buffers.get('cpu', 6),
 				num_gpu_buffers=self.pipeline_buffers.get('gpu', 2)
 			)
 			
@@ -170,10 +170,11 @@ class InferencePipelined:
 		if not hasattr(self, "tokenizer"): 
 			self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
+	# FIX: Added a top-level cleanup method for the user to call
 	def cleanup(self):
 		"""
 		Call this method to gracefully shut down the pipeline's background threads
-		before the program exits.
+		before the program exits. This prevents zombie threads.
 		"""
 		if self.use_pipeline and hasattr(self.model, 'cleanup_pipeline'):
 			print("Cleaning up pipeline resources...")

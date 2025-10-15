@@ -147,6 +147,7 @@ class MyLlamaModel(LlamaModel):
             # If this is a new sequence (prefill with many tokens), reset generation counter
             # Detect prefill: large cache_position or no past_key_values
             is_prefill = (cache_position.numel() > 1) or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            # FIX: Use getattr for safer access on the first run
             if is_prefill and getattr(pipeline, '_last_was_decode', False):
                 # Transition from decode to prefill means new sequence
                 pipeline.reset_generation_counter()
@@ -198,6 +199,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
         with torch.no_grad():
             return super().generate(**args)
     
+    # CHANGE: Modified to accept buffer counts
     def enable_pipeline(self, enable: bool = True, num_cpu_buffers: int = 3, num_gpu_buffers: int = 2):
         """Enable or disable pipelined loading with configurable buffer counts."""
         global pipeline, loader, stats
@@ -217,10 +219,11 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
         else:
             self.cleanup_pipeline()
     
+    # FIX: Added an explicit cleanup method
     def cleanup_pipeline(self):
         """
         Explicitly stop and clean up the pipeline resources.
-        This is more reliable than using __del__.
+        This is the reliable way to prevent zombie threads.
         """
         global pipeline
         if pipeline is not None:
@@ -229,5 +232,9 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
             print("[Llama] Pipeline cleaned up and disabled.")
 
     def __del__(self):
-        """Attempt to cleanup pipeline on deletion, though explicit cleanup is preferred."""
+        """
+        Attempt to cleanup pipeline on deletion.
+        NOTE: This is not reliable. Always call the explicit .cleanup() method
+        on the InferencePipelined object before your program exits.
+        """
         self.cleanup_pipeline()

@@ -88,22 +88,33 @@ class LayerPipeline:
             print("[Pipeline] Disk loader thread started.")
 
     def stop(self):
-        """Stop the disk loading thread."""
+        """Stop the disk loading thread gracefully."""
+        if self.disk_loader_thread is None:
+            return
+            
         self.stop_thread.set()
+        # Unblock the worker thread if it's waiting on the queue
         try:
             self.disk_to_cpu_queue.put_nowait(None)
         except queue.Full:
+            # If the queue is full, the worker is busy and will see the stop_thread event soon.
             pass
-        if self.disk_loader_thread:
-            self.disk_loader_thread.join(timeout=2.0)
+        
+        if self.disk_loader_thread.is_alive():
+            self.disk_loader_thread.join(timeout=5.0) # Wait for the thread to finish
+            if self.disk_loader_thread.is_alive():
+                print("[Pipeline] WARNING: Disk loader thread did not stop within timeout.")
+        
+        self.disk_loader_thread = None
         print("[Pipeline] Disk loader thread stopped.")
+
 
     def _disk_loader_worker(self):
         """Background thread that loads layers from disk into a pre-allocated CPU buffer."""
         while not self.stop_thread.is_set():
             try:
                 task = self.disk_to_cpu_queue.get(timeout=0.1)
-                if task is None:
+                if task is None: # Sentinel value to exit
                     break
                 
                 layer_idx, generation, target_buffer_idx, event = task
@@ -128,6 +139,7 @@ class LayerPipeline:
                 continue
             except Exception as e:
                 print(f"[Pipeline] Error in disk loader: {e}")
+                self.stop_thread.set() # Stop on error
 
     def _schedule_disk_load(self, layer_idx: int, generation: int):
         """Schedule a layer to be loaded from disk into its designated CPU buffer."""
