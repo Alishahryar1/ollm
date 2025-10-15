@@ -21,9 +21,6 @@ class InferencePipelined:
 		self.multimodality = multimodality
 		self.stats = Stats() if logging else None
 		self.use_pipeline = use_pipeline
-		self.model = None
-		self.tokenizer = None
-		self.processor = None
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)
@@ -73,7 +70,7 @@ class InferencePipelined:
 			raise ValueError("Incorrect model id. It must be one of", models_list)
 		
 		model_dir = os.path.join(models_dir, self.model_id)
-		if not os.path.exists(model_dir) or force_download:
+		if os.path.exists(model_dir)==False or force_download==True:
 			if self.model_id in ["model-from-S3-zip"]:
 				self.download_and_unpack(models_dir)
 			else:
@@ -164,22 +161,13 @@ class InferencePipelined:
 
 		self.model.eval()
 		self.model.to(self.device)
-		if not hasattr(self, "tokenizer") or self.tokenizer is None: 
+		if not hasattr(self, "tokenizer"): 
 			self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
 	def cleanup(self):
 		"""
 		Call this method to gracefully shut down the pipeline's background threads
-		before the program exits. This is crucial for pipelined models.
-		
-		Example usage:
-		
-		inference = InferencePipelined(...)
-		try:
-			inference.ini_model()
-			# ... do work ...
-		finally:
-			inference.cleanup()
+		before the program exits.
 		"""
 		if self.use_pipeline and hasattr(self.model, 'cleanup_pipeline'):
 			print("Cleaning up pipeline resources...")
