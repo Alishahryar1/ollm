@@ -127,8 +127,15 @@ class MyLlamaModel(LlamaModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
         
         #============= pipelined execution ==============
-        self.embed_tokens.cpu()
-        self.parent_lm_head.cpu()
+        # Store original device of embed/lm_head
+        embed_device = self.embed_tokens.weight.device
+        lm_head_device = self.parent_lm_head.weight.device
+        
+        # Only move to CPU if they're on GPU (to free VRAM during layer execution)
+        if embed_device.type == 'cuda':
+            self.embed_tokens.cpu()
+        if lm_head_device.type == 'cuda':
+            self.parent_lm_head.cpu()
         
         # Initialize pipeline before first layer
         global pipeline
@@ -158,6 +165,8 @@ class MyLlamaModel(LlamaModel):
             )
         
         hidden_states = self.norm(hidden_states)
+        
+        # Move embed/lm_head back to GPU where hidden_states is
         self.embed_tokens.to(hidden_states.device)
         self.parent_lm_head.to(hidden_states.device)
         

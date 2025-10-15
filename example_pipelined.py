@@ -81,13 +81,24 @@ def cyclic_pipeline_demo():
     
     print("\n" + "-"*80)
     
+    # Decode and display the full answer
+    answer = o.tokenizer.decode(
+        outputs[0][input_ids.shape[-1]:], 
+        skip_special_tokens=True
+    )
+    
     # Performance stats
     total_tokens = outputs.shape[-1]
     new_tokens = total_tokens - input_ids.shape[-1]
     elapsed = t_end - t_start
     tokens_per_sec = new_tokens / elapsed
     
-    print(f"\n[5] Performance Summary:")
+    print(f"\n[5] Generated Response:")
+    print("-"*80)
+    print(answer)
+    print("-"*80)
+    
+    print(f"\n[6] Performance Summary:")
     print(f"    Total time: {elapsed:.2f}s")
     print(f"    Tokens generated: {new_tokens}")
     print(f"    Speed: {tokens_per_sec:.2f} tokens/sec")
