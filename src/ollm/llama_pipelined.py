@@ -200,7 +200,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
             return super().generate(**args)
     
     # CHANGE: Modified to accept buffer counts
-    def enable_pipeline(self, enable: bool = True, num_cpu_buffers: int = 3, num_gpu_buffers: int = 2):
+    def enable_pipeline(self, enable: bool = True, num_cpu_buffers: int = 2, num_gpu_buffers: int = 2):
         """Enable or disable pipelined loading with configurable buffer counts."""
         global pipeline, loader, stats
         
